@@ -1,0 +1,193 @@
+'''
+This script consists of the training classes for the ApiaNet system.
+
+classes:
+    - TrainMotor: Trains the MotorModule using the gustatory synthetic dataset and module to inform flight behaviors to attractive and aversive stimuli.
+'''
+
+# Imports
+import os
+import math
+import torch
+import random
+
+import numpy as np
+import torch.nn as nn
+
+from tqdm import tqdm
+from torch.utils.data import DataLoader
+from apianet.dataset.datagen import GustatoryDataset
+from apianet.src.modules import GustatoryModule, MotorModule
+
+class TrainMotor(nn.Module):
+    def __init__(self, args):
+        super(TrainMotor, self).__init__()
+
+        # set arguments
+        for arg in vars(args):
+            setattr(self, arg, getattr(args, arg))
+
+        # set the model device ("cuda", "MPS", or "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+
+        # check for existence of gustatory model before proceeding
+        self.gust_model = os.path.join(self.models_dir, self.gustatory_model)
+        if not os.path.exists(self.gust_model): # prevent further initialization if model not found
+            raise FileNotFoundError(f"Gustatory model not found at {self.gust_model}. Please train the gustatory module first.")
+        
+        # base normalization factor for the gustatory vector
+        self.base_norm = np.linalg.norm(np.array([1.0, 0.8, 0.6, 0.4, 0.2], dtype=np.float32))
+        
+    def angular_loss(self, pred, tgt):
+        """
+        Computes the mean angular loss between predicted and target direction vectors.
+        Both `pred` and `tgt` should be unit vectors (e.g., [cosθ, sinθ]).
+
+        Args:
+            pred (Tensor): Predicted direction vectors, shape [batch_size, 2]
+            tgt (Tensor): Target direction vectors, shape [batch_size, 2]
+
+        Returns:
+            Tensor: Scalar loss representing mean angular difference (0 = aligned, 2 = opposite)
+        """
+        # Compute dot product between corresponding vectors in batch
+        dot = (pred * tgt).sum(-1).clamp(-1, 1)  # Clamp to handle numerical issues
+        # Convert to loss: 1 - cos(θ); ranges from 0 (perfectly aligned) to 2 (opposite)
+        return (1 - dot).mean()
+
+
+    def angle_error_deg(self, pred, tgt):
+        """
+        Computes the angle error (in degrees) between predicted and target unit vectors.
+        Useful as a human-interpretable evaluation metric.
+
+        Args:
+            pred (Tensor): Predicted direction vectors, shape [batch_size, 2]
+            tgt (Tensor): Target direction vectors, shape [batch_size, 2]
+
+        Returns:
+            np.ndarray: Array of angle errors (degrees) for each sample in batch
+        """
+        # Compute dot product between vectors and clamp to [-1, 1] for safe acos
+        dot = (pred * tgt).sum(-1).clamp(-1, 1)
+        # Compute angle (radians) and convert to degrees
+        angle_rad = torch.acos(dot)  # Arc cosine of dot product gives angle in radians
+        return angle_rad.detach().cpu().numpy() * 180 / math.pi
+    
+    def logistic(self, x):
+        """
+        A logistic activation function centered at x = 0.5 and scaled by a sharpness factor of 5.0.
+        This gives a smooth curve from 0 to 1, useful for smoothly mapping input strengths (like odor norm)
+        to velocity magnitudes.
+
+        Args:
+            x (float): Input scalar in [0, 1]
+
+        Returns:
+            float: Output in (0, 1), steeply increasing around x = 0.5
+        """
+        return 1 / (1 + math.exp(-5.0 * (x - 0.5)))  # Steep sigmoid around 0.5
+    
+    def sample_target(self, odor_vec, label, theta0):
+        """
+        Generates a 3D target output vector [cos(Δθ), sin(Δθ), v] for the motor network.
+        Δθ is the angular difference between the desired heading and current heading theta0.
+        v is the target speed (in [0, 1]), depending on stimulus strength.
+
+        Args:
+            odor_vec (Tensor): A 5D gustatory vector
+            label (int): Stimulus label (0 = neutral, 1 = attractive, 2 = aversive)
+            theta0 (float): Current heading in radians
+
+        Returns:
+            Tensor: A 3D tensor representing direction and velocity target
+        """
+        # Step 1: Normalize the odor vector strength relative to a predefined base norm
+        norm = odor_vec.norm().item() / self.base_norm
+
+        if label == 1:
+            # ATTRACTIVE stimulus
+            # Smaller cone for stronger odor → more focused heading
+            cone = math.radians(10 + 20 * (1 - norm))  # cone in radians: between 10° and 30°
+            theta_abs = random.gauss(0.0, cone)        # desired heading is roughly straight ahead
+            v = 1.0 * self.logistic(norm)              # speed increases with odor strength
+
+        elif label == 2:
+            # AVERSIVE stimulus
+            # Always turn away (centered at 180°), with small cone of uncertainty
+            cone = math.radians(5)
+            theta_abs = math.pi + random.gauss(0.0, cone)  # aim opposite current heading
+            v = 1.0 * self.logistic(norm)                  # stronger aversion → faster escape
+
+        else:
+            # NEUTRAL stimulus
+            # Maintain current heading and full speed
+            theta_abs, v = theta0, 1.0
+
+        # Step 2: Convert absolute target heading into relative heading (Δθ from current direction)
+        dtheta = ((theta_abs - theta0 + math.pi) % (2 * math.pi)) - math.pi
+        # Step 3: Return unit direction vector [cos(Δθ), sin(Δθ)] and speed scalar
+        return torch.tensor([math.cos(dtheta), math.sin(dtheta), v], dtype=torch.float32)
+        
+    def train(self):
+        # initialize and load the pre-trained gustatory model
+        gustatory = GustatoryModule().to(self.device)
+        gustatory.load_state_dict(torch.load(self.gust_model, map_location=self.device, weights_only=True))
+        gustatory.eval()
+
+        # initialize gustatory dataset generator
+        dataset = GustatoryDataset(num_samples=3000)
+        dataloader = DataLoader(dataset, batch_size=64, shuffle=True)
+
+        # intiialize motor module
+        motor = MotorModule().to(self.device)
+        motor.train()
+
+        # set up optimizer
+        optimizer = torch.optim.Adam(motor.parameters(), lr=1e-3)
+
+        # run main training loop
+        pbar = tqdm(range(self.epoch), desc="Training Motor Module")
+        for epoch in pbar:
+            av_loss = 0.0
+            for i, (gustatory_vector, label) in enumerate(dataloader):
+                # move data to device
+                gustatory_vector = gustatory_vector.to(self.device)
+                label = label.to(self.device)
+
+                # forward pass through gustatory module
+                with torch.no_grad():
+                    gustatory_output = gustatory(gustatory_vector)
+                    gustatory_classification = torch.softmax(gustatory_output, dim=1)
+
+                # generate random heading direction
+                ang = torch.rand(gustatory_vector.size(0), device=self.device) * 2 * math.pi
+                h0 = torch.stack([torch.cos(ang), torch.sin(ang)], 1)
+
+                # prepare motor input
+                motor_input = torch.cat([gustatory_output, gustatory_classification, h0], dim=1)
+
+                # motor forward pass
+                pred_dir, pred_vel = motor(motor_input)
+
+                # target generation
+                target = torch.stack([
+                    self.sample_target(o, l.item(), a) 
+                    for o, l, a in zip(gustatory_vector, label, ang)
+                ]).to(self.device)
+
+                # compute loss
+                loss = self.angular_loss(pred_dir, target[:, :2]) + nn.functional.mse_loss(pred_vel, target[:, 2])
+
+                # backward + optimize
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                # update running loss
+                av_loss += loss.item()
+
+            # average epoch loss
+            av_loss /= len(dataloader)
+            pbar.set_postfix(loss=av_loss)

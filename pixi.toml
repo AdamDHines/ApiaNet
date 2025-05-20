@@ -1,0 +1,17 @@
+[project]
+name = "apianet"
+version = "0.0.1"
+description = "Modelling of honeybee active vision with vision, gustatory, and motor module control"
+authors = ["Adam D Hines <adam.hines@mq.edu.au", "Andrew Barron <andrew.barron@mq.edu.au>"]
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "win-64"]
+preview = ["pixi-build"]
+
+[dependencies]
+python = ">3.6,<=3.11"
+numpy = ">=1.26.4,<2"
+pytorch = ">=2.4.0"
+tqdm = ">=4.66.5"
+
+[tasks]
+train_motor = {cmd = "pixi run python main.py --mode train --module motor"}
