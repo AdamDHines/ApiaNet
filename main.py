@@ -22,17 +22,27 @@
 
 import argparse
 
-from apianet.src.train import TrainMotor
+from apianet.src.train import TrainVision, TrainGustatory, TrainMotor
 
 def apianet_eval(args):
     pass
 
 def apianet_train(args):
+    if args.module == 'vision':
+        # Initialize the training class
+        trainer = TrainVision(args)
+        trainer.train()
+    elif args.module == 'gustatory':
+        # Initialize the training class
+        trainer = TrainGustatory(args)
+        trainer.train()
     # Train the motor module
-    if args.module == 'motor':
+    elif args.module == 'motor':
         # Initialize the training class
         trainer = TrainMotor(args)
         trainer.train()
+    else:
+        raise ValueError(f"Module {args.module} not recognized. Choose from ['vision', 'motor', 'gustatory', 'association']")
 
 
 def parse_args():
@@ -42,7 +52,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Args for default configuration")
 
     # Training or evaluation mode
-    parser.add_argument('--mode', type=str, default='eval', choices=['train', 'eval'],
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'eval'],
                         help='Mode to run: training or evaluation network')
     
     # If training, specify module to train
@@ -58,8 +68,12 @@ def parse_args():
                         help='Directory to save and load models')
     
     # Model names
+    parser.add_argument('--vision_model', type=str, default='VisionModel.pth',
+                        help='Name of the vision model for saving/loading')
     parser.add_argument('--gustatory_model', type=str, default='GustatoryModel.pth',
                         help='Name of the gustatory model for saving/loading')
+    parser.add_argument('--motor_model', type=str, default='MotorModel.pth',
+                        help='Name of the motor model for saving/loading')
     
     # Output base configuration
     args = parser.parse_args()

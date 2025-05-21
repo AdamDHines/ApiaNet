@@ -3,15 +3,23 @@ name = "apianet"
 version = "0.0.1"
 description = "Modelling of honeybee active vision with vision, gustatory, and motor module control"
 authors = ["Adam D Hines <adam.hines@mq.edu.au", "Andrew Barron <andrew.barron@mq.edu.au>"]
-channels = ["conda-forge"]
+channels = ["conda-forge", "pytorch"]
 platforms = ["linux-64", "osx-arm64", "win-64"]
 preview = ["pixi-build"]
 
 [dependencies]
 python = ">3.6,<=3.11"
-numpy = ">=1.26.4,<2"
+numpy = "==1.26.4,<2"
 pytorch = ">=2.4.0"
+torchvision = ">=0.19.0"
 tqdm = ">=4.66.5"
+opencv = ">=4.10.0"
+imageio = ">=2.36.1"
 
 [tasks]
-train_motor = {cmd = "pixi run python main.py --mode train --module motor"}
+# training tasks
+train_vision = {cmd = "pixi run python main.py --mode train --module vision --epoch 30"}
+train_gustatory = {cmd = "pixi run python main.py --mode train --module gustatory --epoch 20"}
+train_motor = {cmd = "pixi run python main.py --mode train --module motor --epoch 10"}
+
+# evaluation tasks

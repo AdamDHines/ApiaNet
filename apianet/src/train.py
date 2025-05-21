@@ -15,9 +15,167 @@ import numpy as np
 import torch.nn as nn
 
 from tqdm import tqdm
+from torchvision import transforms
 from torch.utils.data import DataLoader
-from apianet.dataset.datagen import GustatoryDataset
-from apianet.src.modules import GustatoryModule, MotorModule
+from apianet.dataset.datagen import VisionDataset, GustatoryDataset
+from apianet.src.modules import VisionModule, GustatoryModule, MotorModule
+
+class TrainVision(nn.Module):
+    def __init__(self, args):
+        super(TrainVision, self).__init__()
+
+        # set arguments
+        for arg in vars(args):
+            setattr(self, arg, getattr(args, arg))
+
+        # set the model device ("cuda", "MPS", or "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device} - note: MPS not supported for vision module yet, see https://github.com/pytorch/pytorch/issues/96056")
+
+    def train(self):
+        # Check for existence of vision model before proceeding
+        vision_model = os.path.join(self.models_dir, self.vision_model)
+        if os.path.exists(vision_model):
+            print(f"Vision model already exists at {vision_model}. Overwrite? ((y)/n)")
+
+            # Get user input
+            user_input = input().strip().lower()
+
+            if user_input == 'n':
+                print("Exiting training.")
+                return
+            elif user_input not in ('', 'y'):
+                print("Invalid input. Exiting training.")
+                return
+            else:
+                print("Continuing training and overwriting existing model.")
+
+        # initialize dataset generator
+        image_transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+        mask_transform = transforms.Compose([
+            transforms.ToTensor(),
+        ])
+
+        # Create dataset and dataloader.
+        dataset = VisionDataset(num_samples=1000, image_transform=image_transform, mask_transform=mask_transform)
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+        # initialize vision module
+        vision = VisionModule().to(self.device)
+        vision.train()
+
+        # define optimizer and loss functions
+        optimizer = torch.optim.Adam(vision.parameters(), lr=1e-3)
+        criterion_color = nn.CrossEntropyLoss()
+        criterion_edge = nn.BCEWithLogitsLoss()
+
+        pbar = tqdm(range(self.epoch), desc="Training", unit="epoch")
+        for epoch in pbar:
+            running_loss = 0.0
+            for images, labels, edges in dataloader:
+                # Move data to device
+                images, labels, edges = images.to(self.device), labels.to(self.device), edges.to(self.device)
+                optimizer.zero_grad()
+                # Forward pass
+                pred_color, pred_edge, _ = vision(images)
+
+                # Resize ground truth edge map to match prediction
+                target_edges = torch.nn.functional.interpolate(
+                    edges, size=pred_edge.shape[-2:], mode='bilinear', align_corners=False
+                )
+
+                # Compute losses
+                loss_color = criterion_color(pred_color, labels)
+                loss_edge = criterion_edge(pred_edge, target_edges)
+                loss = loss_color + loss_edge
+
+                # Backprop and optimization
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item() * images.size(0)
+
+            # Compute average loss and update epoch-level progress bar
+            epoch_loss = running_loss / len(dataset)
+            pbar.set_postfix(loss=epoch_loss)
+        
+        # save the trained model
+        torch.save(vision.state_dict(), vision_model)
+        print(f"Model saved to {os.path.join(self.models_dir, self.vision_model)}")
+
+class TrainGustatory(nn.Module):
+    def __init__(self, args):
+        super(TrainGustatory, self).__init__()
+
+        # set arguments
+        for arg in vars(args):
+            setattr(self, arg, getattr(args, arg))
+
+        # set the model device ("cuda", "MPS", or "cpu")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+
+    def train(self):
+        # Check for existence of gustatory model before proceeding
+        gust_model = os.path.join(self.models_dir, self.gustatory_model)
+
+        # Confirm user wants to overwrite existing model, default is 'y'
+        if os.path.exists(gust_model):
+            print(f"Model already exists at {gust_model}. Overwrite? ((y)/n)")
+
+            # Get user input
+            user_input = input().strip().lower()
+
+            if user_input == 'n':
+                print("Exiting training.")
+                return
+            elif user_input not in ('', 'y'):
+                print("Invalid input. Exiting training.")
+                return
+            else:
+                print("Continuing training and overwriting existing model.")
+            
+        # Create training dataset and dataloader.
+        dataset = GustatoryDataset(num_samples=1000)
+        dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+        # Initialize gustatory module
+        gustatory = GustatoryModule().to(self.device)
+        gustatory.train()
+
+        # define loss and optimizer
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(gustatory.parameters(), lr=1e-3)
+
+        pbar = tqdm(range(self.epoch), desc="Training Gustatory Module", unit="epoch")
+        for epoch in pbar:
+            running_loss = 0.0
+            for gustatory_vector, label in dataloader:
+                # Move data to device
+                gustatory_vector = gustatory_vector.to(self.device)
+                label = label.to(self.device)
+
+                # Forward + backward + optimize
+                optimizer.zero_grad()
+                logits = gustatory(gustatory_vector)
+                loss = criterion(logits, label)
+                loss.backward()
+                optimizer.step()
+
+                # Accumulate total loss scaled by batch size
+                running_loss += loss.item() * gustatory_vector.size(0)
+
+            # Compute average loss across the epoch
+            epoch_loss = running_loss / len(dataset)
+
+            # Update tqdm progress bar with average loss
+            pbar.set_postfix(loss=epoch_loss)
+
+        # save the trained model
+        torch.save(gustatory.state_dict(), gust_model)
+        print(f"Model saved to {os.path.join(self.models_dir, self.gustatory_model)}")
 
 class TrainMotor(nn.Module):
     def __init__(self, args):
@@ -131,6 +289,23 @@ class TrainMotor(nn.Module):
         return torch.tensor([math.cos(dtheta), math.sin(dtheta), v], dtype=torch.float32)
         
     def train(self):
+        # Check for existence of motor module before proceeding
+        motor_model = os.path.join(self.models_dir, self.motor_model)
+        if os.path.exists(motor_model):
+            print(f"Motor model already exists at {motor_model}. Overwrite? ((y)/n)")
+
+            # Get user input
+            user_input = input().strip().lower()
+
+            if user_input == 'n':
+                print("Exiting training.")
+                return
+            elif user_input not in ('', 'y'):
+                print("Invalid input. Exiting training.")
+                return
+            else:
+                print("Continuing training and overwriting existing model.")
+
         # initialize and load the pre-trained gustatory model
         gustatory = GustatoryModule().to(self.device)
         gustatory.load_state_dict(torch.load(self.gust_model, map_location=self.device, weights_only=True))
@@ -191,3 +366,7 @@ class TrainMotor(nn.Module):
             # average epoch loss
             av_loss /= len(dataloader)
             pbar.set_postfix(loss=av_loss)
+        
+        # save the trained model
+        torch.save(motor.state_dict(), motor_model)
+        print(f"Model saved to {os.path.join(self.models_dir, self.motor_model)}")

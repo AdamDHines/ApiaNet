@@ -24,6 +24,8 @@ share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+*.pth
+
 MANIFEST
 
 # PyInstaller
@@ -174,4 +176,4 @@ cython_debug/
 .pypirc
 
 # MacOS files
-.DS_Store
+*.DS_Store

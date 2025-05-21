@@ -7,12 +7,212 @@ classes:
 
 
 # Imports
+import cv2
 import torch
 import random
 
 import numpy as np
 
 from torch.utils.data import Dataset
+from PIL import Image, ImageDraw, ImageFilter, ImageChops
+
+class VisionDataset(Dataset):
+    """
+    PyTorch dataset simulating a synthetic visual environment with distinct geometric shapes.
+    Returns:
+        - image (Tensor): RGB image patch of size 75x75
+        - label (int): index of the dominant RGB channel (0=Red, 1=Green, 2=Blue)
+        - edge_mask (Tensor): binary edge mask of the image patch
+
+    Shapes are drawn with randomized spatial arrangements, and patches are extracted 
+    to simulate a visual field. Labels are based on the dominant color used for all shapes.
+    """
+    def __init__(self, num_samples, image_transform=None, mask_transform=None):
+        self.num_samples = num_samples                # Number of samples in the dataset
+        self.image_transform = image_transform        # Optional transform for image
+        self.mask_transform = mask_transform          # Optional transform for mask
+
+        # Arena configuration and shape placement parameters
+        self.img_size = 450                           # Full image size
+        self.patch_size = 75                          # Patch size to simulate visual field
+        self.center = (self.img_size // 2, self.img_size // 2)  # Center of arena
+        self.outer_radius = 200                       # Radius of the outer arena circle
+        self.small_radius = 37.5                      # Radius of the inner reward zone
+        self.buffer = 5                               # Distance buffer between reward and shapes
+        self.border_width = 2                         # Outline thickness for reward zones
+        self.min_distance = 10                        # Minimum spacing between shapes
+        self.num_shapes = 400                         # Number of shapes to generate per scene
+        self.shape_types = ['circle', 'square', 'triangle', 'cross']  # Supported shape types
+
+        # Compute shape radius to occupy a consistent area
+        self.shape_radius = self.compute_shape_radius(80)
+
+    def __len__(self):
+        return self.num_samples
+
+    def compute_shape_radius(self, shape_size):
+        # Compute radius from pixel area assuming circular equivalence
+        return np.sqrt(shape_size / np.pi)
+
+    def generate_random_positions(self, num_items, min_distance, exclude_radius, max_distance):
+        """
+        Generates non-overlapping (x, y) offsets from center for placing shapes.
+        Ensures shapes lie outside the inner reward area but within the outer arena.
+        """
+        xs, ys = [], []
+        attempts = 0
+        max_attempts = num_items * 100
+        while len(xs) < num_items and attempts < max_attempts:
+            angle = np.random.uniform(0, 2*np.pi)
+            distance = np.random.uniform(exclude_radius, max_distance)
+            new_x = distance * np.cos(angle)
+            new_y = distance * np.sin(angle)
+            if all(np.hypot(new_x - xi, new_y - yi) >= min_distance for xi, yi in zip(xs, ys)):
+                xs.append(new_x)
+                ys.append(new_y)
+            attempts += 1
+        return np.array(xs), np.array(ys)
+
+    # Shape drawing functions for different types
+    def draw_circle(self, draw_obj, cx, cy, radius, fill_color):
+        bbox = [cx - radius, cy - radius, cx + radius, cy + radius]
+        draw_obj.ellipse(bbox, fill=fill_color)
+
+    def draw_square(self, draw_obj, cx, cy, radius, fill_color):
+        draw_obj.polygon([
+            (cx - radius, cy - radius),
+            (cx + radius, cy - radius),
+            (cx + radius, cy + radius),
+            (cx - radius, cy + radius)
+        ], fill=fill_color)
+
+    def draw_triangle(self, draw_obj, cx, cy, radius, fill_color):
+        h = radius * np.sqrt(3)
+        draw_obj.polygon([
+            (cx, cy - 2*h/3),
+            (cx - radius, cy + h/3),
+            (cx + radius, cy + h/3)
+        ], fill=fill_color)
+
+    def draw_cross(self, draw_obj, cx, cy, radius, fill_color):
+        thickness = max(1, int(radius * 0.3))
+        draw_obj.line([(cx - radius, cy - radius), (cx + radius, cy + radius)],
+                      fill=fill_color, width=thickness)
+        draw_obj.line([(cx - radius, cy + radius), (cx + radius, cy - radius)],
+                      fill=fill_color, width=thickness)
+
+    def draw_shape_at_position(self, draw_obj, shape_type, cx, cy, shape_radius, fill_color):
+        # Dispatch to appropriate drawing method
+        getattr(self, f"draw_{shape_type}")(draw_obj, cx, cy, shape_radius, fill_color)
+
+    def generate_background_image(self):
+        """
+        Creates an off-white background with pink dots, skipping any that fall inside the arena.
+        """
+        bg = np.ones((self.img_size, self.img_size, 3), dtype=np.uint8) * 255
+        dot_radius = 3
+        for _ in range(4000):
+            px, py = random.randint(0, self.img_size-1), random.randint(0, self.img_size-1)
+            if (px - self.center[0])**2 + (py - self.center[1])**2 < self.outer_radius**2:
+                continue  # Dot falls inside arena — skip it
+            cv2.circle(bg, (px, py), dot_radius, (230, 161, 161), thickness=-1)
+        return Image.fromarray(bg)
+
+    def generate_full_stimulus(self):
+        """
+        Generates a complete arena stimulus with shapes and background, and produces:
+            - the final RGB image,
+            - the label (based on RGB dominance),
+            - and a binary edge mask of all content regions.
+        """
+        # Start with a background
+        background_img = self.generate_background_image().convert("RGBA")
+        img = Image.new("RGBA", (self.img_size, self.img_size))
+        img.paste(background_img, (0, 0))
+        draw = ImageDraw.Draw(img)
+
+        # Draw outer arena and inner reward circle
+        draw.ellipse(
+            [self.center[0]-self.outer_radius, self.center[1]-self.outer_radius,
+             self.center[0]+self.outer_radius, self.center[1]+self.outer_radius],
+            fill=(255,255,255,255), outline="black"
+        )
+        draw.ellipse(
+            [self.center[0]-self.small_radius, self.center[1]-self.small_radius,
+             self.center[0]+self.small_radius, self.center[1]+self.small_radius],
+            fill=(255,255,255,255), outline="black"
+        )
+
+        # Randomly pick a color for all shapes and determine label by RGB dominance
+        R, G, B = [random.randint(0, 255) for _ in range(3)]
+        shape_color = (R, G, B, 255)
+        label = int(np.argmax([R, G, B]))
+
+        # Generate random positions and draw all shapes
+        exclude_radius = self.small_radius + self.buffer + self.shape_radius + self.border_width
+        max_distance = self.outer_radius - self.shape_radius - self.border_width
+        xs, ys = self.generate_random_positions(self.num_shapes, self.min_distance, exclude_radius, max_distance)
+
+        shapes_drawn = []
+        for x_offset, y_offset in zip(xs, ys):
+            cx, cy = self.center[0] + x_offset, self.center[1] + y_offset
+            shape_type = random.choice(self.shape_types)
+            shapes_drawn.append((cx, cy, shape_type))
+            self.draw_shape_at_position(draw, shape_type, cx, cy, self.shape_radius, shape_color)
+
+        # Convert to RGB for use as input image
+        img = img.convert("RGB")
+
+        # Build the segmentation mask of shapes + arena
+        mask = Image.new("L", (self.img_size, self.img_size), 0)
+        draw_mask = ImageDraw.Draw(mask)
+        for cx, cy, shape_type in shapes_drawn:
+            self.draw_shape_at_position(draw_mask, shape_type, cx, cy, self.shape_radius, 255)
+        draw_mask.ellipse(
+            [self.center[0]-self.small_radius, self.center[1]-self.small_radius,
+             self.center[0]+self.small_radius, self.center[1]+self.small_radius],
+            fill=255
+        )
+        draw_mask.ellipse(
+            [self.center[0]-self.outer_radius, self.center[1]-self.outer_radius,
+             self.center[0]+self.outer_radius, self.center[1]+self.outer_radius],
+            outline=255, width=2
+        )
+
+        # Add edges of background dots to the mask
+        bg_mask = self.generate_background_image().convert("L")
+        bg_mask = bg_mask.point(lambda p: 255 if p < 250 else 0)
+        mask = ImageChops.lighter(mask, bg_mask)
+
+        return img, label, mask
+
+    def __getitem__(self, idx):
+        """
+        Returns a random cropped 75x75 patch from a full stimulus image, along with:
+            - the RGB patch,
+            - the class label (dominant color),
+            - and a binary edge mask from the segmentation.
+        """
+        full_img, label, full_mask = self.generate_full_stimulus()
+
+        # Randomly crop a patch from the full arena
+        left = random.randint(0, self.img_size - self.patch_size)
+        upper = random.randint(0, self.img_size - self.patch_size)
+        right, lower = left + self.patch_size, upper + self.patch_size
+        patch_img = full_img.crop((left, upper, right, lower))
+        patch_mask_pil = full_mask.crop((left, upper, right, lower))
+
+        # Apply edge detection to the mask
+        patch_edge_pil = patch_mask_pil.filter(ImageFilter.FIND_EDGES)
+
+        # Apply optional transforms
+        if self.image_transform:
+            patch_img = self.image_transform(patch_img)
+        if self.mask_transform:
+            patch_edge = self.mask_transform(patch_edge_pil)
+            patch_edge = (patch_edge > 0.5).float()
+
+        return patch_img, label, patch_edge
 
 class GustatoryDataset(Dataset):
     """
