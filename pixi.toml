@@ -15,6 +15,8 @@ torchvision = ">=0.19.0"
 tqdm = ">=4.66.5"
 opencv = ">=4.10.0"
 imageio = ">=2.36.1"
+matplotlib-base = ">=3.5.3" 
+scikit-learn = ">=1.5.1"
 
 [tasks]
 # training tasks
@@ -23,3 +25,6 @@ train_gustatory = {cmd = "pixi run python main.py --mode train --module gustator
 train_motor = {cmd = "pixi run python main.py --mode train --module motor --epoch 10"}
 
 # evaluation tasks
+eval_vision = {cmd = "pixi run python main.py --mode eval --module vision"}
+eval_gustatory = {cmd = "pixi run python main.py --mode eval --module gustatory"}
+eval_motor = {cmd = "pixi run python main.py --mode eval --module motor"}

@@ -22,10 +22,25 @@
 
 import argparse
 
+from apianet.src.eval import EvalVision, EvalGustatory, EvalMotor
 from apianet.src.train import TrainVision, TrainGustatory, TrainMotor
 
 def apianet_eval(args):
-    pass
+    if args.module == 'vision':
+        # Initialize the evaluation class
+        evaluator = EvalVision(args)
+        evaluator.eval()
+    elif args.module == 'gustatory':
+        # Initialize the evaluation class
+        evaluator = EvalGustatory(args)
+        evaluator.eval()
+    # # Evaluate the motor module
+    elif args.module == 'motor':
+        # Initialize the evaluation class
+        evaluator = EvalMotor(args)
+        evaluator.eval()
+    else:
+        raise ValueError(f"Module {args.module} not recognized. Choose from ['vision', 'motor', 'gustatory', 'association']")
 
 def apianet_train(args):
     if args.module == 'vision':

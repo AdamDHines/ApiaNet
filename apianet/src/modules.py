@@ -10,6 +10,7 @@ classes:
     - MotorModule: A motor control module that takes an 8D input vector and outputs a normalized 2D movement direction vector and a velocity scalar.
         - Direction head: Predicts a 2D direction vector.
         - Velocity head: Predicts a scalar velocity.
+    - AssociationModule: A recurrent neural network (RNN) for processing sequences of input vectors.
 '''
 # Imports
 import torch
@@ -143,3 +144,19 @@ class MotorModule(nn.Module):
         d = nn.functional.normalize(self.dir(h), dim=-1, eps=1e-6)  # Normalize direction to unit vector
         v = torch.sigmoid(self.v(h)).squeeze(-1)            # Sigmoid velocity between 0 and 1
         return d, v
+    
+class AssociationModule(nn.Module):
+    def __init__(self, input_dim=36, hidden_dim=64, num_layers=1, num_classes=3):
+        super(AssociationModule, self).__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, num_classes)
+    
+    def forward(self, x, return_sequence=False):
+        lstm_out, _ = self.lstm(x)
+        if return_sequence:
+            seq_logits = self.fc(lstm_out)
+            return seq_logits
+        else:
+            final_hidden = lstm_out[:, -1, :]
+            logits = self.fc(final_hidden)
+            return logits

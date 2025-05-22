@@ -2,6 +2,8 @@
 This script consists of the training classes for the ApiaNet system.
 
 classes:
+    - TrainVision: Trains the VisionModule using the visual synthetic dataset and module to inform flight behaviors to attractive and aversive stimuli.
+    - TrainGustatory: Trains the GustatoryModule using the gustatory synthetic dataset and module to inform flight behaviors to attractive and aversive stimuli.
     - TrainMotor: Trains the MotorModule using the gustatory synthetic dataset and module to inform flight behaviors to attractive and aversive stimuli.
 '''
 

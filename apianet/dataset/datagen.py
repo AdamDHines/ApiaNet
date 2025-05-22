@@ -27,7 +27,7 @@ class VisionDataset(Dataset):
     Shapes are drawn with randomized spatial arrangements, and patches are extracted 
     to simulate a visual field. Labels are based on the dominant color used for all shapes.
     """
-    def __init__(self, num_samples, image_transform=None, mask_transform=None):
+    def __init__(self, num_samples, image_transform=None, mask_transform=None, eval=False):
         self.num_samples = num_samples                # Number of samples in the dataset
         self.image_transform = image_transform        # Optional transform for image
         self.mask_transform = mask_transform          # Optional transform for mask
@@ -43,9 +43,18 @@ class VisionDataset(Dataset):
         self.min_distance = 10                        # Minimum spacing between shapes
         self.num_shapes = 400                         # Number of shapes to generate per scene
         self.shape_types = ['circle', 'square', 'triangle', 'cross']  # Supported shape types
+        self.dot_size = 80                      # Size of the dots in eval mode
+        self.num_dots = 400                         # Number of dots to generate in eval mode
 
         # Compute shape radius to occupy a consistent area
         self.shape_radius = self.compute_shape_radius(80)
+        self.dot_radius = self.compute_shape_radius(self.dot_size)
+
+        # green dot percentages
+        self.green_percantage_options = [80, 20]  # Options for green dot percentage in eval mode
+
+        # store eval flag
+        self.eval = eval
 
     def __len__(self):
         return self.num_samples
@@ -53,6 +62,25 @@ class VisionDataset(Dataset):
     def compute_shape_radius(self, shape_size):
         # Compute radius from pixel area assuming circular equivalence
         return np.sqrt(shape_size / np.pi)
+    
+    def generate_random_circle_dots(self, num_dots, green_percentage, min_distance, exclude_radius, max_distance):
+        xs, ys = [], []
+        attempts = 0
+        max_attempts = num_dots * 100
+        while len(xs) < num_dots and attempts < max_attempts:
+            angle = np.random.uniform(0, 2 * np.pi)
+            distance = np.random.uniform(exclude_radius, max_distance)
+            new_x = distance * np.cos(angle)
+            new_y = distance * np.sin(angle)
+            if all(np.hypot(new_x - xi, new_y - yi) >= min_distance for xi, yi in zip(xs, ys)):
+                xs.append(new_x)
+                ys.append(new_y)
+            attempts += 1
+        num_green = int(num_dots * green_percentage / 100)
+        num_blue = num_dots - num_green
+        colors = ['green'] * num_green + ['blue'] * num_blue
+        random.shuffle(colors)
+        return np.array(xs), np.array(ys), colors
 
     def generate_random_positions(self, num_items, min_distance, exclude_radius, max_distance):
         """
@@ -120,66 +148,97 @@ class VisionDataset(Dataset):
 
     def generate_full_stimulus(self):
         """
-        Generates a complete arena stimulus with shapes and background, and produces:
-            - the final RGB image,
-            - the label (based on RGB dominance),
-            - and a binary edge mask of all content regions.
+        Generates the full arena stimulus. If `self.eval` is True, use green/blue dot-based generation
+        with label based on green percentage. Otherwise, use random shapes and label by RGB dominance.
+        Both methods return:
+            - The final RGB image
+            - A label
+            - A binary edge mask
         """
-        # Start with a background
+        # Start with background
         background_img = self.generate_background_image().convert("RGBA")
         img = Image.new("RGBA", (self.img_size, self.img_size))
         img.paste(background_img, (0, 0))
         draw = ImageDraw.Draw(img)
 
-        # Draw outer arena and inner reward circle
+        # Draw arena structure
         draw.ellipse(
             [self.center[0]-self.outer_radius, self.center[1]-self.outer_radius,
-             self.center[0]+self.outer_radius, self.center[1]+self.outer_radius],
+            self.center[0]+self.outer_radius, self.center[1]+self.outer_radius],
             fill=(255,255,255,255), outline="black"
         )
         draw.ellipse(
             [self.center[0]-self.small_radius, self.center[1]-self.small_radius,
-             self.center[0]+self.small_radius, self.center[1]+self.small_radius],
+            self.center[0]+self.small_radius, self.center[1]+self.small_radius],
             fill=(255,255,255,255), outline="black"
         )
 
-        # Randomly pick a color for all shapes and determine label by RGB dominance
-        R, G, B = [random.randint(0, 255) for _ in range(3)]
-        shape_color = (R, G, B, 255)
-        label = int(np.argmax([R, G, B]))
+        if self.eval:
+            # Eval mode: dot-based with green/blue split
+            green_percentage = random.choice(self.green_percantage_options)
+            label = 1 if green_percentage > 50 else 2
 
-        # Generate random positions and draw all shapes
-        exclude_radius = self.small_radius + self.buffer + self.shape_radius + self.border_width
-        max_distance = self.outer_radius - self.shape_radius - self.border_width
-        xs, ys = self.generate_random_positions(self.num_shapes, self.min_distance, exclude_radius, max_distance)
+            exclude_radius = self.small_radius + self.buffer + self.dot_radius + self.border_width
+            max_distance = self.outer_radius - self.dot_radius - self.border_width
 
-        shapes_drawn = []
-        for x_offset, y_offset in zip(xs, ys):
-            cx, cy = self.center[0] + x_offset, self.center[1] + y_offset
-            shape_type = random.choice(self.shape_types)
-            shapes_drawn.append((cx, cy, shape_type))
-            self.draw_shape_at_position(draw, shape_type, cx, cy, self.shape_radius, shape_color)
+            xs, ys, colors = self.generate_random_circle_dots(
+                self.num_dots, green_percentage, self.min_distance,
+                exclude_radius, max_distance
+            )
 
-        # Convert to RGB for use as input image
+            for x_offset, y_offset, col in zip(xs, ys, colors):
+                dot_color = (0, 255, 0, 255) if col == 'green' else (0, 0, 255, 255)
+                bbox = [
+                    self.center[0] + x_offset - self.dot_radius,
+                    self.center[1] + y_offset - self.dot_radius,
+                    self.center[0] + x_offset + self.dot_radius,
+                    self.center[1] + y_offset + self.dot_radius
+                ]
+                draw.ellipse(bbox, fill=dot_color)
+
+        else:
+            # Training mode: shape-based with RGB-dominant label
+            R, G, B = [random.randint(0, 255) for _ in range(3)]
+            shape_color = (R, G, B, 255)
+            label = int(np.argmax([R, G, B]))
+
+            exclude_radius = self.small_radius + self.buffer + self.shape_radius + self.border_width
+            max_distance = self.outer_radius - self.shape_radius - self.border_width
+
+            xs, ys = self.generate_random_positions(self.num_shapes, self.min_distance, exclude_radius, max_distance)
+
+            self.shapes_drawn = []
+            for x_offset, y_offset in zip(xs, ys):
+                cx, cy = self.center[0] + x_offset, self.center[1] + y_offset
+                shape_type = random.choice(self.shape_types)
+                self.shapes_drawn.append((cx, cy, shape_type))
+                self.draw_shape_at_position(draw, shape_type, cx, cy, self.shape_radius, shape_color)
+
+        # Finalize image
         img = img.convert("RGB")
 
-        # Build the segmentation mask of shapes + arena
+        # Create mask
         mask = Image.new("L", (self.img_size, self.img_size), 0)
         draw_mask = ImageDraw.Draw(mask)
-        for cx, cy, shape_type in shapes_drawn:
-            self.draw_shape_at_position(draw_mask, shape_type, cx, cy, self.shape_radius, 255)
+
+        # Always include inner reward circle and outer ring edge
         draw_mask.ellipse(
             [self.center[0]-self.small_radius, self.center[1]-self.small_radius,
-             self.center[0]+self.small_radius, self.center[1]+self.small_radius],
+            self.center[0]+self.small_radius, self.center[1]+self.small_radius],
             fill=255
         )
         draw_mask.ellipse(
             [self.center[0]-self.outer_radius, self.center[1]-self.outer_radius,
-             self.center[0]+self.outer_radius, self.center[1]+self.outer_radius],
+            self.center[0]+self.outer_radius, self.center[1]+self.outer_radius],
             outline=255, width=2
         )
 
-        # Add edges of background dots to the mask
+        if not self.eval:
+            # Add drawn shapes to mask
+            for cx, cy, shape_type in self.shapes_drawn:
+                self.draw_shape_at_position(draw_mask, shape_type, cx, cy, self.shape_radius, 255)
+
+        # Add background dot edges to mask
         bg_mask = self.generate_background_image().convert("L")
         bg_mask = bg_mask.point(lambda p: 255 if p < 250 else 0)
         mask = ImageChops.lighter(mask, bg_mask)
@@ -224,7 +283,7 @@ class GustatoryDataset(Dataset):
             1 = attractive (centered overlap, attractive),
             2 = aversive (centered overlap, aversive)
     """
-    def __init__(self, num_samples, centre_prob=0.7):
+    def __init__(self, num_samples, centre_prob=0.9):
         self.N = num_samples                   # Number of samples in the dataset
         self.centre_prob = centre_prob         # Probability that a patch is sampled from near the arena center
 
