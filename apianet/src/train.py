@@ -267,11 +267,21 @@ class TrainMotor(nn.Module):
         norm = odor_vec.norm().item() / self.base_norm
 
         if label == 1:
-            # ATTRACTIVE stimulus
-            # Smaller cone for stronger odor → more focused heading
-            cone = math.radians(10 + 20 * (1 - norm))  # cone in radians: between 10° and 30°
-            theta_abs = random.gauss(0.0, cone)        # desired heading is roughly straight ahead
-            v = 1.0 * self.logistic(norm)              # speed increases with odor strength
+            # ATTRACTIVE stimulus → Circular scanning pattern
+            norm = max(1e-6, min(norm, 1.0))  # Clamp norm for safety
+
+            # Radius decreases with stimulus strength (stronger = tighter)
+            # Use an angular offset to simulate curve
+            max_offset = math.radians(45)  # wide arc for weak stimulus
+            min_offset = math.radians(5)   # tight arc for strong stimulus
+            dtheta = max_offset * (1 - norm) + min_offset * norm
+
+            # Turn slightly left (counter-clockwise scan) — could randomize later
+            theta_abs = theta0 + dtheta
+
+            # Speed scales *down* with strength
+            v = norm
+            return torch.tensor([math.cos(theta_abs), math.sin(theta_abs), v], dtype=torch.float32)
 
         elif label == 2:
             # AVERSIVE stimulus
@@ -281,9 +291,8 @@ class TrainMotor(nn.Module):
             v = 1.0 * self.logistic(norm)                  # stronger aversion → faster escape
 
         else:
-            # NEUTRAL stimulus
-            # Maintain current heading and full speed
-            theta_abs, v = theta0, 1.0
+            # NEUTRAL stimulus — maintain current heading directly
+            return torch.tensor([math.cos(theta0), math.sin(theta0), 1.0], dtype=torch.float32)
 
         # Step 2: Convert absolute target heading into relative heading (Δθ from current direction)
         dtheta = ((theta_abs - theta0 + math.pi) % (2 * math.pi)) - math.pi
@@ -355,7 +364,9 @@ class TrainMotor(nn.Module):
                 ]).to(self.device)
 
                 # compute loss
-                loss = self.angular_loss(pred_dir, target[:, :2]) + nn.functional.mse_loss(pred_vel, target[:, 2])
+                direction_weight = (label != 0).float() * 1.0 + (label == 0).float() * 0.25
+                ang_loss = self.angular_loss(pred_dir, target[:, :2]) * direction_weight
+                loss = ang_loss.mean() + nn.functional.mse_loss(pred_vel, target[:, 2])
 
                 # backward + optimize
                 optimizer.zero_grad()

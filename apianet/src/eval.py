@@ -229,18 +229,54 @@ class EvalMotor:
         return 1 / (1 + math.exp(-self.SPEED_K * (x - 0.5)))
 
     def sample_target(self, odor_vec, label, theta0):
+        """
+        Generates a 3D target output vector [cos(Δθ), sin(Δθ), v] for the motor network.
+        Δθ is the angular difference between the desired heading and current heading theta0.
+        v is the target speed (in [0, 1]), depending on stimulus strength.
+
+        Args:
+            odor_vec (Tensor): A 5D gustatory vector
+            label (int): Stimulus label (0 = neutral, 1 = attractive, 2 = aversive)
+            theta0 (float): Current heading in radians
+
+        Returns:
+            Tensor: A 3D tensor representing direction and velocity target
+        """
+        # Step 1: Normalize the odor vector strength relative to a predefined base norm
         norm = odor_vec.norm().item() / self.BASE_NORM
-        if label == 1:  # Appetitive
-            cone = math.radians(10 + 20 * (1 - norm))
-            theta_abs = random.gauss(0.0, cone)
-            v = self.V_MAX - (self.V_MAX - self.V_MIN) * self.logistic(norm)
-        elif label == 2:  # Aversive
+
+        if label == 1:
+            # ATTRACTIVE stimulus → Circular scanning pattern
+            norm = max(1e-6, min(norm, 1.0))  # Clamp norm for safety
+
+            # Radius decreases with stimulus strength (stronger = tighter)
+            # Use an angular offset to simulate curve
+            max_offset = math.radians(45)  # wide arc for weak stimulus
+            min_offset = math.radians(5)   # tight arc for strong stimulus
+            dtheta = max_offset * (1 - norm) + min_offset * norm
+
+            # Turn slightly left (counter-clockwise scan) — could randomize later
+            theta_abs = theta0 + dtheta
+
+            # Speed scales *down* with strength
+            v = (1 - norm**2)  # Smooth slow-down
+
+            return torch.tensor([math.cos(theta_abs), math.sin(theta_abs), v], dtype=torch.float32)
+
+        elif label == 2:
+            # AVERSIVE stimulus
+            # Always turn away (centered at 180°), with small cone of uncertainty
             cone = math.radians(5)
-            theta_abs = math.pi + random.gauss(0.0, cone)
-            v = self.V_MIN + (self.V_MAX - self.V_MIN) * self.logistic(norm)
-        else:  # Neutral
-            theta_abs, v = theta0, 1.0
+            theta_abs = math.pi + random.gauss(0.0, cone)  # aim opposite current heading
+            v = 1.0 * self.logistic(norm)                  # stronger aversion → faster escape
+
+        else:
+            # NEUTRAL stimulus — maintain current heading directly
+            return torch.tensor([math.cos(theta0), math.sin(theta0), 1.0], dtype=torch.float32)
+
+        # Step 2: Convert absolute target heading into relative heading (Δθ from current direction)
         dtheta = ((theta_abs - theta0 + math.pi) % (2 * math.pi)) - math.pi
+        # Step 3: Return unit direction vector [cos(Δθ), sin(Δθ)] and speed scalar
         return torch.tensor([math.cos(dtheta), math.sin(dtheta), v], dtype=torch.float32)
 
     def angle_error_deg(self, pred, tgt):
